@@ -6,30 +6,40 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"whatsapp/internal/database"
+	"whatsapp/internal/middleware"
 
 	_ "github.com/joho/godotenv/autoload"
-
-	"whatsapp/internal/database"
+	"github.com/labstack/echo/v4"
 )
 
 type Server struct {
-	port int
-
-	db database.Service
+	port   int
+	db     database.DbService
+	router *echo.Echo
 }
 
 func NewServer() *http.Server {
 	port, _ := strconv.Atoi(os.Getenv("PORT"))
-	NewServer := &Server{
+	s := &Server{
 		port: port,
-
-		db: database.New(),
+		db:   database.New(),
 	}
 
-	// Declare Server config
+	// Crée Echo et configure toutes les routes
+	e := echo.New()
+	s.router = e // <-- important pour les handlers
+
+	// Initialise le middleware de session avec la DB
+	middleware.InitSessionMiddleware(s.db.Pool())
+
+	// Configure middlewares et routes
+	s.RegisterRoutes()
+
+	// Démarre Echo comme http.Handler
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", NewServer.port),
-		Handler:      NewServer.RegisterRoutes(),
+		Addr:         fmt.Sprintf(":%d", s.port),
+		Handler:      e, // <-- ici tu passes Echo, pas e.RegisterRoutes()
 		IdleTimeout:  time.Minute,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
