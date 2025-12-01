@@ -24,6 +24,8 @@ type User struct {
 	CreatedAt              time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt              time.Time  `json:"updated_at" db:"updated_at"`
 	LastLoginAt            *time.Time `json:"last_login_at" db:"last_login_at"`
+	GoogleID               *string    `json:"google_id" db:"google_id"`
+	OAuthProvider          string     `json:"oauth_provider" db:"oauth_provider"`
 }
 
 type UserResponse struct {

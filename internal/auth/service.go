@@ -7,6 +7,8 @@ import (
 	"fmt"
 	mrand "math/rand"
 	"time"
+	"whatsapp/internal/config"
+	"whatsapp/internal/errors"
 	"whatsapp/internal/mailer"
 	"whatsapp/internal/user"
 
@@ -15,13 +17,13 @@ import (
 	"github.com/skip2/go-qrcode"
 )
 
-//go:generate mockgen -source=service.go -destination=./auth_service_mock.go -package=auth
+//go:generate mockgen -source=service.go -destination=./auth_mock.go -package=auth
 type AuthStore interface {
 	CheckUserEmailExists(ctx context.Context, email string) (bool, error)
 	FindByEmail(ctx context.Context, email string) (*user.User, error)
 	CreateUser(ctx context.Context, user *user.User) error
 	FindUserBySession(ctx context.Context, token string) (*user.User, error)
-	CreateSession(ctx context.Context, userID, token, ip, userAgent string, expiresAt time.Time) error
+	CreateSession(ctx context.Context, userID uuid.UUID, token, ip, userAgent string, expiresAt time.Time) error
 	DeleteSession(ctx context.Context, token string) error
 	DeleteAllUserSessions(ctx context.Context, userID string) error
 	UpdateLastLogin(ctx context.Context, userID uuid.UUID) error
@@ -30,23 +32,39 @@ type AuthStore interface {
 	SaveResetPasswordToken(ctx context.Context, userID, token string) error
 	FindUserByResetToken(ctx context.Context, token string) (*user.User, error)
 	UpdateUserPassword(ctx context.Context, userID uuid.UUID, hashedPassword string) error
-	IncrementLoginAttempts(ctx context.Context, email string) error
+	IncrementLoginAttempts(ctx context.Context, email string) (int, error)
 	ResetLoginAttempts(ctx context.Context, email string) error
 	GetLoginAttempts(ctx context.Context, email string) (int, error)
 	EnableTOTP(ctx context.Context, userID uuid.UUID, secret string, recoveryCodes []string) error
 	DisableTOTP(ctx context.Context, userID uuid.UUID) error
+	FindUserByGoogleID(ctx context.Context, googleID string) (*user.User, error)
+	CreateGoogleUser(ctx context.Context, user *user.User) error
+	UpdateGoogleUserInfo(ctx context.Context, userID uuid.UUID, firstName, lastName, profilePicture string) error
 }
 
 type Service struct {
 	s      AuthStore
 	mailer mailer.Mailer
+	config *config.Config
 }
 
-func NewService(store AuthStore, mailer mailer.Mailer) *Service {
-	return &Service{s: store, mailer: mailer}
+func NewService(store AuthStore, mailer mailer.Mailer, cfg *config.Config) *Service {
+	return &Service{
+		s:      store,
+		mailer: mailer,
+		config: cfg,
+	}
 }
 
 func (s *Service) Register(ctx context.Context, req RegisterRequest) (*user.User, error) {
+	existingUser, err := s.s.FindByEmail(ctx, req.Email)
+	if err == nil {
+		if existingUser.OAuthProvider == GoogleProvider {
+			return nil, ErrGoogleOAuthExists
+		}
+		return nil, ErrUserExists
+	}
+
 	if !IsValidEmail(req.Email) {
 		return nil, ErrEmailInvalid
 	}
@@ -55,19 +73,16 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*user.User
 		return nil, ErrPasswordWeak
 	}
 
-	exists, _ := s.s.CheckUserEmailExists(ctx, req.Email)
-	if exists {
-		return nil, ErrUserExists
-	}
-
 	hashedPassword, err := HashPassword(req.Password)
 	if err != nil {
-		return nil, err
+		errors.WithStack(err)
+		return nil, ErrInternalError
 	}
 
 	activationToken, err := GenerateToken()
 	if err != nil {
-		return nil, err
+		errors.WithStack(err)
+		return nil, ErrInternalError
 	}
 
 	avatarURL := GenerateAvatarURL(&req.FirstName, &req.LastName)
@@ -83,11 +98,19 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*user.User
 	}
 
 	if err := s.s.CreateUser(ctx, newUser); err != nil {
-		return nil, err
+		errors.WithStack(err)
+		return nil, ErrInternalError
 	}
 
 	go func() {
-		mailer.SendWelcomeEmail(ctx, s.mailer, newUser.Email, newUser.FirstName, newUser.LastName, activationToken)
+		defer func() {
+			if r := recover(); r != nil {
+				errors.WithStack(fmt.Errorf("welcome email panic: %v", r))
+			}
+		}()
+		if err := mailer.SendWelcomeEmail(ctx, s.mailer, newUser.Email, newUser.FirstName, newUser.LastName, activationToken); err != nil {
+			errors.WithStack(err)
+		}
 	}()
 
 	return newUser, nil
@@ -98,17 +121,20 @@ const maxLoginAttempts = 5
 func (s *Service) Login(ctx context.Context, req LoginRequest, ip, userAgent string) (*user.User, *string, error) {
 	attempts, err := s.s.GetLoginAttempts(ctx, req.Email)
 	if err == nil && attempts >= maxLoginAttempts {
+		errors.WithStack(err)
 		return nil, nil, ErrTooManyAttempts
 	}
 
 	user, err := s.s.FindByEmail(ctx, req.Email)
 	if err != nil || !ComparePassword(user.PasswordHash, req.Password) {
-		s.s.IncrementLoginAttempts(ctx, req.Email)
+		_, _ = s.s.IncrementLoginAttempts(ctx, req.Email)
+		errors.WithStack(err)
 		return nil, nil, ErrInvalidCredentials
 	}
 
 	if !user.IsActive {
-		s.s.IncrementLoginAttempts(ctx, req.Email)
+		_, _ = s.s.IncrementLoginAttempts(ctx, req.Email)
+		errors.WithStack(err)
 		return nil, nil, ErrAccountNotActivated
 	}
 
@@ -117,16 +143,24 @@ func (s *Service) Login(ctx context.Context, req LoginRequest, ip, userAgent str
 	sessionToken := uuid.NewString()
 	expiresAt := time.Now().UTC().Add(30 * 24 * time.Hour)
 
-	if err := s.s.CreateSession(ctx, user.ID.String(), sessionToken, ip, userAgent, expiresAt); err != nil {
+	if err := s.s.CreateSession(ctx, user.ID, sessionToken, ip, userAgent, expiresAt); err != nil {
+		errors.WithStack(err)
 		return nil, nil, ErrInternalError
 	}
 
-	s.s.UpdateLastLogin(ctx, user.ID)
 	return user, &sessionToken, nil
 }
 
 func (s *Service) Logout(ctx context.Context, token string) error {
-	return s.s.DeleteSession(ctx, token)
+	if token == "" {
+		return ErrInvalidToken
+	}
+
+	if err := s.s.DeleteSession(ctx, token); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (s *Service) ActivateAccount(ctx context.Context, token string) error {
@@ -139,7 +173,11 @@ func (s *Service) ActivateAccount(ctx context.Context, token string) error {
 		return ErrInvalidToken
 	}
 
-	s.s.ActivateUserAccount(ctx, user.ID)
+	if err := s.s.ActivateUserAccount(ctx, user.ID); err != nil {
+		errors.WithStack(err)
+		return err
+	}
+
 	return nil
 }
 
@@ -151,13 +189,24 @@ func (s *Service) ForgotPassword(ctx context.Context, email string) error {
 
 	token, err := GenerateToken()
 	if err != nil {
+		errors.WithStack(err)
 		return ErrInternalError
 	}
 
-	s.s.SaveResetPasswordToken(ctx, user.ID.String(), token)
+	if err := s.s.SaveResetPasswordToken(ctx, user.ID.String(), token); err != nil {
+		errors.WithStack(err)
+		return ErrInternalError
+	}
 
 	go func() {
-		mailer.SendResetPasswordEmail(ctx, s.mailer, user.Email, user.FirstName+" "+user.LastName, token)
+		defer func() {
+			if r := recover(); r != nil {
+				errors.WithStack(fmt.Errorf("password reset email panic: %v", r))
+			}
+		}()
+		if err := mailer.SendResetPasswordEmail(ctx, s.mailer, user.Email, user.FirstName+" "+user.LastName, token); err != nil {
+			errors.WithStack(err)
+		}
 	}()
 
 	return nil
@@ -170,15 +219,30 @@ func (s *Service) ResetPassword(ctx context.Context, token, password string) err
 
 	user, err := s.s.FindUserByResetToken(ctx, token)
 	if err != nil {
+		errors.WithStack(err)
 		return ErrInvalidToken
 	}
 
-	hashedPassword, _ := HashPassword(password)
+	if !IsStrongPassword(password) {
+		return ErrPasswordWeak
+	}
+
+	hashedPassword, err := HashPassword(password)
+	if err != nil {
+		errors.WithStack(err)
+		return ErrInternalError
+	}
+
 	if err := s.s.UpdateUserPassword(ctx, user.ID, hashedPassword); err != nil {
+		errors.WithStack(err)
 		return err
 	}
 
-	s.s.DeleteAllUserSessions(ctx, user.ID.String())
+	if err := s.s.DeleteAllUserSessions(ctx, user.ID.String()); err != nil {
+		errors.WithStack(err)
+		return err
+	}
+
 	return nil
 }
 
@@ -200,7 +264,7 @@ func generateTOTPSecret() (string, error) {
 
 func generateRecoveryCodes() []string {
 	codes := make([]string, 10)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		codes[i] = fmt.Sprintf("%04d-%04d", mrand.Intn(10000), mrand.Intn(10000))
 	}
 	return codes
@@ -225,28 +289,32 @@ func (s *Service) SetupTOTP(ctx context.Context, userEmail, password string) (*T
 
 	user, err := s.s.FindByEmail(ctx, userEmail)
 	if err != nil {
+		errors.WithStack(err)
 		return nil, ErrUserNotFound
 	}
 
 	if !ComparePassword(user.PasswordHash, password) {
+		errors.WithStack(fmt.Errorf("invalid password for user %s", user.ID.String()))
 		return nil, ErrInvalidCredentials
 	}
 
 	secret, err := generateTOTPSecret()
 	if err != nil {
+		errors.WithStack(err)
 		return nil, ErrInternalError
 	}
 
 	qrCode, err := generateQRCode(secret, userEmail)
 	if err != nil {
+		errors.WithStack(err)
 		return nil, ErrInternalError
 	}
 
 	recoveryCodes := generateRecoveryCodes()
 
 	return &TOTPSetupResponse{
-		Secret:     secret,
-		QRCode:     qrCode,
+		Secret:      secret,
+		QRCode:      qrCode,
 		BackupCodes: recoveryCodes,
 	}, nil
 }
@@ -258,14 +326,21 @@ func (s *Service) EnableTOTP(ctx context.Context, userEmail, token, secret strin
 
 	user, err := s.s.FindByEmail(ctx, userEmail)
 	if err != nil {
+		errors.WithStack(err)
 		return ErrUserNotFound
 	}
 
 	if !totp.Validate(token, secret) {
+		errors.WithStack(fmt.Errorf("invalid TOTP token for user %s", user.ID.String()))
 		return ErrInvalidToken
 	}
 
-	return s.s.EnableTOTP(ctx, user.ID, secret, recoveryCodes)
+	if err := s.s.EnableTOTP(ctx, user.ID, secret, recoveryCodes); err != nil {
+		errors.WithStack(err)
+		return err
+	}
+
+	return nil
 }
 
 func (s *Service) DisableTOTP(ctx context.Context, userEmail, password, token string) error {
@@ -275,10 +350,12 @@ func (s *Service) DisableTOTP(ctx context.Context, userEmail, password, token st
 
 	user, err := s.s.FindByEmail(ctx, userEmail)
 	if err != nil {
+		errors.WithStack(err)
 		return ErrUserNotFound
 	}
 
 	if !ComparePassword(user.PasswordHash, password) {
+		errors.WithStack(fmt.Errorf("invalid password for user %s", user.ID.String()))
 		return ErrInvalidCredentials
 	}
 
@@ -287,32 +364,42 @@ func (s *Service) DisableTOTP(ctx context.Context, userEmail, password, token st
 	}
 
 	if !totp.Validate(token, *user.TwoFactorSecret) {
+		errors.WithStack(fmt.Errorf("invalid TOTP token for user %s", user.ID.String()))
 		return ErrInvalidToken
 	}
 
-	return s.s.DisableTOTP(ctx, user.ID)
+	if err := s.s.DisableTOTP(ctx, user.ID); err != nil {
+		errors.WithStack(err)
+		return err
+	}
+
+	return nil
 }
 
 func (s *Service) LoginWithTOTP(ctx context.Context, req LoginWithTOTPRequest, ip, userAgent string) (*user.User, *string, error) {
 	attempts, err := s.s.GetLoginAttempts(ctx, req.Email)
 	if err == nil && attempts >= maxLoginAttempts {
+		errors.WithStack(err)
 		return nil, nil, ErrTooManyAttempts
 	}
 
 	user, err := s.s.FindByEmail(ctx, req.Email)
 	if err != nil || !ComparePassword(user.PasswordHash, req.Password) {
 		s.s.IncrementLoginAttempts(ctx, req.Email)
+		errors.WithStack(err)
 		return nil, nil, ErrInvalidCredentials
 	}
 
 	if !user.IsActive {
 		s.s.IncrementLoginAttempts(ctx, req.Email)
+		errors.WithStack(fmt.Errorf("account not activated for user %s", user.ID.String()))
 		return nil, nil, ErrAccountNotActivated
 	}
 
 	if user.TwoFactorEnabled && user.TwoFactorSecret != nil {
 		if !totp.Validate(req.TOTPToken, *user.TwoFactorSecret) {
 			s.s.IncrementLoginAttempts(ctx, req.Email)
+			errors.WithStack(fmt.Errorf("invalid TOTP token for user %s", user.ID.String()))
 			return nil, nil, ErrInvalidTOTPToken
 		}
 	}
@@ -329,10 +416,14 @@ func (s *Service) LoginWithTOTP(ctx context.Context, req LoginWithTOTPRequest, i
 	sessionToken := uuid.NewString()
 	expiresAt := time.Now().UTC().Add(sessionTTL)
 
-	if err := s.s.CreateSession(ctx, user.ID.String(), sessionToken, ip, userAgent, expiresAt); err != nil {
+	if err := s.s.CreateSession(ctx, user.ID, sessionToken, ip, userAgent, expiresAt); err != nil {
+		errors.WithStack(err)
 		return nil, nil, ErrInternalError
 	}
 
-	s.s.UpdateLastLogin(ctx, user.ID)
+	if err := s.s.UpdateLastLogin(ctx, user.ID); err != nil {
+		errors.WithStack(err)
+	}
+
 	return user, &sessionToken, nil
 }

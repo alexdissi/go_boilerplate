@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 	"whatsapp/internal/user"
 
@@ -31,22 +32,38 @@ func (s *Store) CreateUser(ctx context.Context, user *user.User) error {
 		PlaceholderFormat(sq.Dollar).
 		ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to build create user query: %w", err)
 	}
-	return s.pool.QueryRow(ctx, query, args...).Scan(&user.ID)
+
+	err = s.pool.QueryRow(ctx, query, args...).Scan(&user.ID)
+	if err != nil {
+		return fmt.Errorf("failed to create user: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Store) CheckUserEmailExists(ctx context.Context, email string) (bool, error) {
 	query, args, err := sq.
-		Select("EXISTS (SELECT 1 FROM users WHERE email = $1)").
+		Select("1").
+		From("users").
+		Where(sq.Eq{"email": email}).
+		Limit(1).
 		PlaceholderFormat(sq.Dollar).
 		ToSql()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("failed to build email check query: %w", err)
 	}
-	var exists bool
-	s.pool.QueryRow(ctx, query, args...).Scan(&exists)
-	return exists, nil
+
+	var dummy int
+	err = s.pool.QueryRow(ctx, query, args...).Scan(&dummy)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check email existence: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Store) FindByEmail(ctx context.Context, email string) (*user.User, error) {
@@ -58,7 +75,7 @@ func (s *Store) FindByEmail(ctx context.Context, email string) (*user.User, erro
 		PlaceholderFormat(sq.Dollar).
 		ToSql()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to build query: %w", err)
 	}
 
 	var user user.User
@@ -70,23 +87,40 @@ func (s *Store) FindByEmail(ctx context.Context, email string) (*user.User, erro
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
-	return &user, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan user data: %w", err)
+	}
+
+	return &user, nil
 }
 
 func (s *Store) FindUserBySession(ctx context.Context, token string) (*user.User, error) {
-	query, args, err := sq.
-		Select("u.id", "u.email", "u.password_hash", "u.first_name", "u.last_name", "u.profile_picture",
-			"u.created_at", "u.updated_at", "u.last_login_at", "u.is_active", "u.activation_token",
-			"u.two_factor_enabled", "u.two_factor_secret", "u.recovery_codes").
-		From("sessions s").
-		Join("users u ON u.id = s.user_id").
-		Where(sq.Eq{"s.session_token": token}).
-		Where(sq.Expr("s.expires_at > NOW()")).
+	subQuery, subArgs, err := sq.
+		Select("user_id").
+		From("sessions").
+		Where(sq.Eq{"session_token": token}).
+		Where(sq.Expr("expires_at > NOW()")).
+		Limit(1).
 		PlaceholderFormat(sq.Dollar).
 		ToSql()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to build session subquery: %w", err)
 	}
+
+	query, args, err := sq.
+		Select("u.id", "u.email", "u.password_hash", "u.first_name", "u.last_name",
+			"u.profile_picture", "u.created_at", "u.updated_at", "u.last_login_at",
+			"u.is_active", "u.activation_token", "u.two_factor_enabled",
+			"u.two_factor_secret", "u.recovery_codes").
+		From("users u").
+		Where(sq.Expr(fmt.Sprintf("u.id = (%s)", subQuery))).
+		PlaceholderFormat(sq.Dollar).
+		ToSql()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build user by session query: %w", err)
+	}
+
+	args = append(subArgs, args...)
 
 	var user user.User
 	err = s.pool.QueryRow(ctx, query, args...).Scan(
@@ -97,11 +131,19 @@ func (s *Store) FindUserBySession(ctx context.Context, token string) (*user.User
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
-	return &user, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to find user by session: %w", err)
+	}
+	return &user, nil
 }
 
-func (s *Store) CreateSession(ctx context.Context, userID, token, ip, userAgent string, expiresAt time.Time) error {
-	// Nettoyer les anciennes sessions expirées
+func (s *Store) CreateSession(ctx context.Context, userID uuid.UUID, token, ip, userAgent string, expiresAt time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	deleteQuery, deleteArgs, err := sq.
 		Delete("sessions").
 		Where(sq.Eq{"user_id": userID}).
@@ -109,22 +151,51 @@ func (s *Store) CreateSession(ctx context.Context, userID, token, ip, userAgent 
 		PlaceholderFormat(sq.Dollar).
 		ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to build delete expired sessions query: %w", err)
 	}
-	s.pool.Exec(ctx, deleteQuery, deleteArgs...)
 
-	// Créer la nouvelle session
-	query, args, err := sq.
+	_, err = tx.Exec(ctx, deleteQuery, deleteArgs...)
+	if err != nil {
+		return fmt.Errorf("failed to clean user expired sessions: %w", err)
+	}
+
+	insertQuery, insertArgs, err := sq.
 		Insert("sessions").
 		Columns("user_id", "session_token", "ip_address", "user_agent", "expires_at", "created_at").
 		Values(userID, token, ip, userAgent, expiresAt, nowUTC()).
 		PlaceholderFormat(sq.Dollar).
 		ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to build create session query: %w", err)
 	}
+
+	_, err = tx.Exec(ctx, insertQuery, insertArgs...)
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit session creation transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) CleanExpiredSessions(ctx context.Context) error {
+	query, args, err := sq.
+		Delete("sessions").
+		Where(sq.Expr("expires_at <= NOW()")).
+		PlaceholderFormat(sq.Dollar).
+		ToSql()
+	if err != nil {
+		return fmt.Errorf("failed to build cleanup query: %w", err)
+	}
+
 	_, err = s.pool.Exec(ctx, query, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to clean expired sessions: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
@@ -260,19 +331,25 @@ func (s *Store) UpdateUserPassword(ctx context.Context, userID uuid.UUID, hashed
 	return err
 }
 
-func (s *Store) IncrementLoginAttempts(ctx context.Context, email string) error {
+func (s *Store) IncrementLoginAttempts(ctx context.Context, email string) (int, error) {
 	query, args, err := sq.
 		Update("users").
 		Set("login_attempts", sq.Expr("login_attempts + 1")).
 		Set("updated_at", nowUTC()).
 		Where(sq.Eq{"email": email}).
+		Suffix("RETURNING login_attempts").
 		PlaceholderFormat(sq.Dollar).
 		ToSql()
 	if err != nil {
-		return err
+		return 0, fmt.Errorf("failed to build increment login attempts query: %w", err)
 	}
-	_, err = s.pool.Exec(ctx, query, args...)
-	return err
+
+	var attempts int
+	err = s.pool.QueryRow(ctx, query, args...).Scan(&attempts)
+	if err != nil {
+		return 0, fmt.Errorf("failed to increment login attempts: %w", err)
+	}
+	return attempts, nil
 }
 
 func (s *Store) ResetLoginAttempts(ctx context.Context, email string) error {
@@ -281,13 +358,22 @@ func (s *Store) ResetLoginAttempts(ctx context.Context, email string) error {
 		Set("login_attempts", 0).
 		Set("updated_at", nowUTC()).
 		Where(sq.Eq{"email": email}).
+		Suffix("RETURNING id").
 		PlaceholderFormat(sq.Dollar).
 		ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to build reset login attempts query: %w", err)
 	}
-	_, err = s.pool.Exec(ctx, query, args...)
-	return err
+
+	var userID uuid.UUID
+	err = s.pool.QueryRow(ctx, query, args...).Scan(&userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		return fmt.Errorf("failed to reset login attempts: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) GetLoginAttempts(ctx context.Context, email string) (int, error) {
@@ -350,4 +436,68 @@ func (s *Store) DisableTOTP(ctx context.Context, userID uuid.UUID) error {
 	}
 	_, err = s.pool.Exec(ctx, query, args...)
 	return err
+}
+
+func (s *Store) FindUserByGoogleID(ctx context.Context, googleID string) (*user.User, error) {
+	query, args, err := sq.
+		Select("id", "email", "first_name", "last_name", "created_at", "two_factor_enabled", "oauth_provider", "google_id", "profile_picture").
+		From("users").
+		Where(sq.Eq{"google_id": googleID}).
+		PlaceholderFormat(sq.Dollar).
+		ToSql()
+	if err != nil {
+		return nil, err
+	}
+
+	var user user.User
+	err = s.pool.QueryRow(ctx, query, args...).Scan(
+		&user.ID, &user.Email, &user.FirstName, &user.LastName,
+		&user.CreatedAt, &user.TwoFactorEnabled,
+		&user.OAuthProvider, &user.GoogleID, &user.ProfilePicture,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (s *Store) CreateGoogleUser(ctx context.Context, user *user.User) error {
+	query, args, err := sq.
+		Insert("users").
+		Columns("email", "first_name", "last_name", "google_id", "oauth_provider", "profile_picture", "created_at", "updated_at").
+		Values(user.Email, user.FirstName, user.LastName, user.GoogleID, user.OAuthProvider, user.ProfilePicture, user.CreatedAt, nowUTC()).
+		Suffix("RETURNING id").
+		PlaceholderFormat(sq.Dollar).
+		ToSql()
+	if err != nil {
+		return err
+	}
+	return s.pool.QueryRow(ctx, query, args...).Scan(&user.ID)
+}
+
+func (s *Store) UpdateGoogleUserInfo(ctx context.Context, userID uuid.UUID, firstName, lastName, profilePicture string) error {
+	query, args, err := sq.
+		Update("users").
+		Set("first_name", firstName).
+		Set("last_name", lastName).
+		Set("profile_picture", profilePicture).
+		Set("updated_at", nowUTC()).
+		Where(sq.Eq{"id": userID}).
+		PlaceholderFormat(sq.Dollar).
+		ToSql()
+	if err != nil {
+		return err
+	}
+
+	tag, err := s.pool.Exec(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }

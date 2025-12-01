@@ -7,7 +7,9 @@ import (
 	"whatsapp/internal/config"
 	"whatsapp/internal/middleware"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"golang.org/x/oauth2"
 )
 
 type Handler struct {
@@ -29,6 +31,8 @@ func (h *Handler) Bind(rg *echo.Group) {
 	rg.POST("/forgot-password", h.ForgotPassword)
 	rg.POST("/reset-password", h.ResetPassword)
 	rg.DELETE("/logout", h.Logout, middleware.CookieSessionMiddleware())
+	rg.GET("/google/auth", h.GoogleAuth)
+	rg.GET("/google/callback", h.GoogleCallback)
 
 	rg.POST("/totp/setup", h.SetupTOTP, middleware.CookieSessionMiddleware())
 	rg.POST("/totp/enable", h.EnableTOTP, middleware.CookieSessionMiddleware())
@@ -278,4 +282,56 @@ func (h *Handler) LoginWithTOTP(c echo.Context) error {
 
 	h.setSessionCookie(c, *token, sessionTTL)
 	return c.JSON(http.StatusOK, user)
+}
+
+func (h *Handler) GoogleAuth(c echo.Context) error {
+	oauthService := NewOAuthService(h.cfg, h.s.s)
+	config := oauthService.GetGoogleOAuthConfig()
+	if config == nil || strings.TrimSpace(config.ClientID) == "" || strings.TrimSpace(config.ClientSecret) == "" {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "OAuth configuration missing required fields"})
+	}
+
+	state := uuid.NewString()
+	url := config.AuthCodeURL(state, oauth2.AccessTypeOffline)
+
+	return c.JSON(http.StatusOK, echo.Map{"auth_url": url})
+}
+
+func (h *Handler) GoogleCallback(c echo.Context) error {
+	ctx := c.Request().Context()
+	code := strings.TrimSpace(c.QueryParam("code"))
+	state := strings.TrimSpace(c.QueryParam("state"))
+	errorParam := strings.TrimSpace(c.QueryParam("error"))
+
+	if errorParam != "" {
+		return c.JSON(http.StatusBadRequest, echo.Map{
+			"error":   "OAuth authorization denied",
+			"code":    "OAUTH_DENIED",
+			"details": errorParam,
+		})
+	}
+
+	if code == "" {
+		return c.JSON(http.StatusBadRequest, echo.Map{
+			"error": "Authorization code missing",
+			"code":  "CODE_MISSING",
+		})
+	}
+
+	ip := c.RealIP()
+	userAgent := c.Request().UserAgent()
+
+	oauthService := NewOAuthService(h.cfg, h.s.s)
+	_, sessionToken, err := oauthService.HandleGoogleCallback(ctx, code, state, ip, userAgent)
+	if err != nil {
+		return WriteError(c, err)
+	}
+
+	if sessionToken == nil || *sessionToken == "" {
+		return WriteError(c, ErrInternalError)
+	}
+
+	h.setSessionCookie(c, *sessionToken, h.cfg.Auth.SessionTTL)
+
+	return c.Redirect(http.StatusTemporaryRedirect, h.cfg.AppURL)
 }

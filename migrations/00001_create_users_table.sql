@@ -4,7 +4,7 @@ CREATE TABLE users (
     first_name VARCHAR(100),
     last_name VARCHAR(100),
     email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255),
     profile_picture TEXT,
     two_factor_enabled BOOLEAN DEFAULT FALSE,
     two_factor_secret TEXT,
@@ -16,6 +16,8 @@ CREATE TABLE users (
     last_login_at TIMESTAMPTZ,
     activation_token TEXT UNIQUE,
     is_active BOOLEAN DEFAULT FALSE,
+    google_id TEXT UNIQUE,
+    oauth_provider TEXT DEFAULT 'email',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -30,7 +32,7 @@ CREATE TABLE sessions (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Indexes pour les performances
+-- Indexes pour les performances (version optimisée)
 CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_users_created_at ON users(created_at);
 CREATE INDEX idx_users_reset_token ON users(reset_password_token) WHERE reset_password_token IS NOT NULL;
@@ -38,7 +40,7 @@ CREATE INDEX idx_users_login_attempts ON users(login_attempts) WHERE login_attem
 CREATE INDEX idx_users_active ON users(is_active) WHERE is_active = TRUE;
 CREATE INDEX idx_sessions_token ON sessions(session_token);
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
+CREATE INDEX idx_sessions_user_expires ON sessions(user_id, expires_at);
 
 -- +goose Down
 DROP TABLE IF EXISTS sessions;
