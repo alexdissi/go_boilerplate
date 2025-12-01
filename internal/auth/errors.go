@@ -17,6 +17,8 @@ func WriteError(c echo.Context, err error) error {
 		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Password is too weak (8+ characters, 1 uppercase, 1 digit, 1 special character)"})
 	case errors.Is(err, ErrUserExists), errors.Is(err, ErrUserAlreadyExist):
 		return c.JSON(http.StatusConflict, echo.Map{"error": "User already exists"})
+	case errors.Is(err, ErrGoogleOAuthExists):
+		return c.JSON(http.StatusConflict, echo.Map{"error": "Email already registered with Google account. Please use Google to sign in"})
 	case errors.Is(err, ErrInvalidCredentials):
 		return c.JSON(http.StatusUnauthorized, echo.Map{"error": "Invalid credentials"})
 	case errors.Is(err, ErrEmailNotVerified):
@@ -57,6 +59,7 @@ var (
 
 	ErrUserAlreadyExist = errors.New("user already exists")
 	ErrUserExists       = errors.New("user already exists")
+	ErrGoogleOAuthExists = errors.New("email already registered with Google account. Please use Google to sign in")
 	ErrUserNotFound     = errors.New("user not found")
 	ErrEmailNotVerified = errors.New("email not verified, please check your inbox")
 	ErrAccountNotActivated = errors.New("account not activated, please check your email for activation link")
