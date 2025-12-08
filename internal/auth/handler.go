@@ -31,6 +31,7 @@ func (h *Handler) Bind(rg *echo.Group) {
 	rg.POST("/forgot-password", h.ForgotPassword)
 	rg.POST("/reset-password", h.ResetPassword)
 	rg.DELETE("/logout", h.Logout, middleware.CookieSessionMiddleware())
+
 	rg.GET("/google/auth", h.GoogleAuth)
 	rg.GET("/google/callback", h.GoogleCallback)
 

@@ -69,7 +69,7 @@ func (s *Store) CheckUserEmailExists(ctx context.Context, email string) (bool, e
 func (s *Store) FindByEmail(ctx context.Context, email string) (*user.User, error) {
 	query, args, err := sq.
 		Select("id", "email", "password_hash", "first_name", "last_name", "profile_picture", "created_at", "updated_at",
-			"last_login_at", "is_active", "activation_token", "two_factor_enabled", "two_factor_secret", "recovery_codes").
+			"last_login_at", "is_active", "activation_token", "two_factor_enabled", "two_factor_secret", "recovery_codes", "oauth_provider").
 		From("users").
 		Where(sq.Eq{"email": email}).
 		PlaceholderFormat(sq.Dollar).
@@ -82,7 +82,7 @@ func (s *Store) FindByEmail(ctx context.Context, email string) (*user.User, erro
 	err = s.pool.QueryRow(ctx, query, args...).Scan(
 		&user.ID, &user.Email, &user.PasswordHash, &user.FirstName, &user.LastName,
 		&user.ProfilePicture, &user.CreatedAt, &user.UpdatedAt, &user.LastLoginAt,
-		&user.IsActive, &user.ActivationToken, &user.TwoFactorEnabled, &user.TwoFactorSecret, &user.RecoveryCodes,
+		&user.IsActive, &user.ActivationToken, &user.TwoFactorEnabled, &user.TwoFactorSecret, &user.RecoveryCodes, &user.OAuthProvider,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound

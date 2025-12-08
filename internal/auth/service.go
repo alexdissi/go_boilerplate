@@ -73,7 +73,7 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*user.User
 		return nil, ErrPasswordWeak
 	}
 
-	hashedPassword, err := HashPassword(req.Password)
+	hashedPassword, err := hashPassword(req.Password)
 	if err != nil {
 		errors.WithStack(err)
 		return nil, ErrInternalError
@@ -126,7 +126,14 @@ func (s *Service) Login(ctx context.Context, req LoginRequest, ip, userAgent str
 	}
 
 	user, err := s.s.FindByEmail(ctx, req.Email)
-	if err != nil || !ComparePassword(user.PasswordHash, req.Password) {
+	if err != nil {
+		_, _ = s.s.IncrementLoginAttempts(ctx, req.Email)
+		errors.WithStack(err)
+		return nil, nil, ErrInvalidCredentials
+	}
+
+	_, err = comparePassword(user.PasswordHash, req.Password)
+	if err != nil {
 		_, _ = s.s.IncrementLoginAttempts(ctx, req.Email)
 		errors.WithStack(err)
 		return nil, nil, ErrInvalidCredentials
@@ -227,7 +234,7 @@ func (s *Service) ResetPassword(ctx context.Context, token, password string) err
 		return ErrPasswordWeak
 	}
 
-	hashedPassword, err := HashPassword(password)
+	hashedPassword, err := hashPassword(password)
 	if err != nil {
 		errors.WithStack(err)
 		return ErrInternalError
@@ -293,7 +300,8 @@ func (s *Service) SetupTOTP(ctx context.Context, userEmail, password string) (*T
 		return nil, ErrUserNotFound
 	}
 
-	if !ComparePassword(user.PasswordHash, password) {
+	_, err = comparePassword(user.PasswordHash, password)
+	if err != nil {
 		errors.WithStack(fmt.Errorf("invalid password for user %s", user.ID.String()))
 		return nil, ErrInvalidCredentials
 	}
@@ -354,7 +362,8 @@ func (s *Service) DisableTOTP(ctx context.Context, userEmail, password, token st
 		return ErrUserNotFound
 	}
 
-	if !ComparePassword(user.PasswordHash, password) {
+	_, err = comparePassword(user.PasswordHash, password)
+	if err != nil {
 		errors.WithStack(fmt.Errorf("invalid password for user %s", user.ID.String()))
 		return ErrInvalidCredentials
 	}
@@ -384,14 +393,21 @@ func (s *Service) LoginWithTOTP(ctx context.Context, req LoginWithTOTPRequest, i
 	}
 
 	user, err := s.s.FindByEmail(ctx, req.Email)
-	if err != nil || !ComparePassword(user.PasswordHash, req.Password) {
-		s.s.IncrementLoginAttempts(ctx, req.Email)
+	if err != nil {
+		_, _ = s.s.IncrementLoginAttempts(ctx, req.Email)
+		errors.WithStack(err)
+		return nil, nil, ErrInvalidCredentials
+	}
+
+	_, err = comparePassword(user.PasswordHash, req.Password)
+	if err != nil {
+		_, _ = s.s.IncrementLoginAttempts(ctx, req.Email)
 		errors.WithStack(err)
 		return nil, nil, ErrInvalidCredentials
 	}
 
 	if !user.IsActive {
-		s.s.IncrementLoginAttempts(ctx, req.Email)
+		_, _ = s.s.IncrementLoginAttempts(ctx, req.Email)
 		errors.WithStack(fmt.Errorf("account not activated for user %s", user.ID.String()))
 		return nil, nil, ErrAccountNotActivated
 	}
