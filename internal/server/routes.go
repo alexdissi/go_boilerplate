@@ -65,8 +65,9 @@ func (s *Server) healthHandler(c echo.Context) error {
 func (s *Server) setupAuthRoutes(apiGroup *echo.Group) {
 	authStore := auth.NewStore(s.db.Pool())
 	mailer := mailer.NewMailer()
-	authService := auth.NewService(authStore, mailer, config.Load())
-	authHandler := auth.NewHandler(authService)
+	cfg := config.Load()
+	authService := auth.NewService(authStore, mailer, cfg)
+	authHandler := auth.NewHandler(authService, cfg)
 
 	authGroup := apiGroup.Group("/auth")
 	authGroup.Use(echomiddleware.RateLimiterWithConfig(echomiddleware.RateLimiterConfig{

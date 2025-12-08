@@ -44,12 +44,8 @@ func setupTestService(t *testing.T) (*Service, *MockAuthStore) {
 		},
 	}
 
-	// Create service
-	service := &Service{
-		s:      mockStore,
-		mailer: &mockMailer{},
-		config: cfg,
-	}
+	// Use NewService to properly initialize cache
+	service := NewService(mockStore, &mockMailer{}, cfg)
 
 	return service, mockStore
 }
@@ -67,7 +63,7 @@ func TestNewService(t *testing.T) {
 	service := NewService(mockStore, &mockMailer{}, cfg)
 
 	assert.NotNil(t, service)
-	assert.Equal(t, mockStore, service.s)
+	assert.Equal(t, mockStore, service.store)
 	assert.Equal(t, cfg, service.config)
 }
 
@@ -135,7 +131,7 @@ func TestService_Login_Success(t *testing.T) {
 		Password: "StrongPass123!",
 	}
 
-	hashedPass, _ := HashPassword(req.Password)
+	hashedPass, _ := hashPassword(req.Password)
 	existingUser := &user.User{
 		ID:           uuid.New(),
 		Email:        req.Email,
@@ -166,7 +162,7 @@ func TestService_Login_InvalidCredentials(t *testing.T) {
 		Password: "wrongpassword",
 	}
 
-	hashedPass, _ := HashPassword("correctpassword")
+	hashedPass, _ := hashPassword("correctpassword")
 	existingUser := &user.User{
 		ID:           uuid.New(),
 		Email:        req.Email,
@@ -272,7 +268,7 @@ func TestService_ForgotPassword_Success(t *testing.T) {
 	mockStore.EXPECT().FindByEmail(ctx, email).Return(existingUser, nil)
 	mockStore.EXPECT().SaveResetPasswordToken(ctx, existingUser.ID.String(), gomock.Any()).Return(nil)
 
-	err := service.ForgotPassword(ctx, email)
+	err := service.ForgotPassword(ctx, email, "127.0.0.1")
 
 	assert.NoError(t, err)
 }
@@ -286,7 +282,7 @@ func TestService_ForgotPassword_UserNotFound(t *testing.T) {
 	// Mock user not found
 	mockStore.EXPECT().FindByEmail(ctx, email).Return(nil, ErrUserNotFound)
 
-	err := service.ForgotPassword(ctx, email)
+	err := service.ForgotPassword(ctx, email, "127.0.0.1")
 
 	assert.Error(t, err)
 	assert.Equal(t, ErrUserNotFound, err)
@@ -397,7 +393,7 @@ func TestGenerateToken(t *testing.T) {
 
 func TestHashPassword(t *testing.T) {
 	password := "TestPassword123!"
-	hash, err := HashPassword(password)
+	hash, err := hashPassword(password)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, hash)
 	assert.NotEqual(t, password, hash)
@@ -408,12 +404,18 @@ func TestHashPassword(t *testing.T) {
 
 func TestComparePassword(t *testing.T) {
 	password := "TestPassword123!"
-	hash, err := HashPassword(password)
+	hash, err := hashPassword(password)
 	require.NoError(t, err)
 
-	assert.True(t, ComparePassword(hash, password))
-	assert.False(t, ComparePassword(hash, "wrongpassword"))
-	assert.False(t, ComparePassword("invalidhash", password))
+	valid, err := comparePassword(hash, password)
+	require.NoError(t, err)
+	assert.True(t, valid)
+
+	valid, _ = comparePassword(hash, "wrongpassword")
+	assert.False(t, valid)
+
+	valid, _ = comparePassword("invalidhash", password)
+	assert.False(t, valid)
 }
 
 func TestGenerateAvatarURL(t *testing.T) {
@@ -429,15 +431,7 @@ func TestGenerateAvatarURL(t *testing.T) {
 }
 
 // OAuth Service tests
-func TestNewOAuthService(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mockStore := NewMockAuthStore(ctrl)
-
-	service := NewOAuthService(nil, mockStore)
-	assert.NotNil(t, service)
-}
-
-func TestOAuthService_GetGoogleOAuthConfig(t *testing.T) {
+func TestService_GetGoogleOAuthConfig(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockAuthStore(ctrl)
 
@@ -447,7 +441,7 @@ func TestOAuthService_GetGoogleOAuthConfig(t *testing.T) {
 		APIURL:      "http://localhost:8080",
 	}
 
-	service := NewOAuthService(cfg, mockStore)
+	service := NewService(mockStore, &mockMailer{}, cfg)
 	oauthConfig := service.GetGoogleOAuthConfig()
 
 	assert.NotNil(t, oauthConfig)
@@ -455,10 +449,11 @@ func TestOAuthService_GetGoogleOAuthConfig(t *testing.T) {
 	assert.Equal(t, []string{"openid", "profile", "email"}, oauthConfig.Scopes)
 }
 
-func TestOAuthService_HandleGoogleCallback_InvalidCode(t *testing.T) {
+func TestService_HandleGoogleCallback_InvalidCode(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockAuthStore(ctrl)
-	service := NewOAuthService(nil, mockStore)
+
+	service := NewService(mockStore, &mockMailer{}, &config.Config{})
 
 	ctx := context.Background()
 	user, token, err := service.HandleGoogleCallback(ctx, "", "state", "127.0.0.1", "test-agent")

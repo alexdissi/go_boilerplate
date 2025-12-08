@@ -9,53 +9,57 @@ import (
 	"strings"
 )
 
+var (
+	emailRegex    = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	hasLowerRegex = regexp.MustCompile(`[a-z]`)
+	hasUpperRegex = regexp.MustCompile(`[A-Z]`)
+	hasDigitRegex = regexp.MustCompile(`\d`)
+	hasSpecRegex  = regexp.MustCompile(`[@$!%*?&]`)
+)
+
 func GenerateAvatarURL(firstName, lastName *string) string {
-	initials := ""
-	if firstName != nil && lastName != nil {
-		initials = fmt.Sprintf("%s%s", strings.ToUpper((*firstName)[:1]), strings.ToUpper((*lastName)[:1]))
-	} else if firstName != nil {
-		initials = strings.ToUpper((*firstName)[:1]) + (*firstName)[1:2]
-	} else if lastName != nil {
-		initials = strings.ToUpper((*lastName)[:1]) + (*lastName)[1:2]
-	} else {
+	var initials string
+
+	switch {
+	case firstName != nil && *firstName != "" && lastName != nil && *lastName != "":
+		initials = strings.ToUpper(string((*firstName)[0])) + strings.ToUpper(string((*lastName)[0]))
+	case firstName != nil && len(*firstName) >= 2:
+		initials = strings.ToUpper((*firstName)[:2])
+	case lastName != nil && len(*lastName) >= 2:
+		initials = strings.ToUpper((*lastName)[:2])
+	default:
 		return "https://api.dicebear.com/9.x/initials/svg?seed="
 	}
 
 	return fmt.Sprintf("https://api.dicebear.com/9.x/initials/svg?seed=%s", initials)
 }
 
-func GenerateSessionToken() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
+func GenerateToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return base64.URLEncoding.EncodeToString(bytes), nil
+	return hex.EncodeToString(b), nil
 }
 
-func GenerateToken() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
+func GenerateSessionToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(bytes), nil
+	return base64.URLEncoding.EncodeToString(b), nil
 }
 
 func IsValidEmail(email string) bool {
-	emailRegex := `^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`
-	re := regexp.MustCompile(emailRegex)
-
-	return re.MatchString(email)
+	return emailRegex.MatchString(email)
 }
 
 func IsStrongPassword(password string) bool {
-	if len(password) < 8 {
+	if len(password) < 8 || len(password) > 72 {
 		return false
 	}
-
-	hasLower := regexp.MustCompile(`[a-z]`).MatchString(password)
-	hasUpper := regexp.MustCompile(`[A-Z]`).MatchString(password)
-	hasDigit := regexp.MustCompile(`\d`).MatchString(password)
-	hasSpecial := regexp.MustCompile(`[@$!%*?&]`).MatchString(password)
-
-	return hasLower && hasUpper && hasDigit && hasSpecial
+	return hasLowerRegex.MatchString(password) &&
+		hasUpperRegex.MatchString(password) &&
+		hasDigitRegex.MatchString(password) &&
+		hasSpecRegex.MatchString(password)
 }

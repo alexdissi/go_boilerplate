@@ -142,34 +142,6 @@ func (mr *MockAuthStoreMockRecorder) DeleteSession(ctx, token any) *gomock.Call 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteSession", reflect.TypeOf((*MockAuthStore)(nil).DeleteSession), ctx, token)
 }
 
-// DisableTOTP mocks base method.
-func (m *MockAuthStore) DisableTOTP(ctx context.Context, userID uuid.UUID) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DisableTOTP", ctx, userID)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// DisableTOTP indicates an expected call of DisableTOTP.
-func (mr *MockAuthStoreMockRecorder) DisableTOTP(ctx, userID any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DisableTOTP", reflect.TypeOf((*MockAuthStore)(nil).DisableTOTP), ctx, userID)
-}
-
-// EnableTOTP mocks base method.
-func (m *MockAuthStore) EnableTOTP(ctx context.Context, userID uuid.UUID, secret string, recoveryCodes []string) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "EnableTOTP", ctx, userID, secret, recoveryCodes)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// EnableTOTP indicates an expected call of EnableTOTP.
-func (mr *MockAuthStoreMockRecorder) EnableTOTP(ctx, userID, secret, recoveryCodes any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnableTOTP", reflect.TypeOf((*MockAuthStore)(nil).EnableTOTP), ctx, userID, secret, recoveryCodes)
-}
-
 // FindByEmail mocks base method.
 func (m *MockAuthStore) FindByEmail(ctx context.Context, email string) (*user.User, error) {
 	m.ctrl.T.Helper()
