@@ -206,7 +206,6 @@ func (s *Service) ForgotPassword(ctx context.Context, email, ip string) error {
 		return ErrInternalError
 	}
 
-	// Marquer la demande avec expiration automatique
 	s.cache.SetWithExpire(email, true, resetPasswordCooldown)
 
 	go s.sendResetPasswordEmail(ctx, user.Email, user.FirstName+" "+user.LastName, token)
